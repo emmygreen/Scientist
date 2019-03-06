@@ -1,0 +1,509 @@
+---
+title: "Children remain interested and feeling efficacious about their capacity to 'do science,' but lose confidence in their potential to 'be scientists'"
+author: "Ryan F. Lei, Emmy Green, & Marjorie Rhodes"
+date: "6/15/2018"
+output:
+  word_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Load libraries needed for these analyses (any uninstalled packages will need to be installed).
+
+library(lmerTest)
+library(lme4)
+library(tidyr)
+library(effects)
+library(ggplot2)
+library(psych)
+library(dplyr)
+library(tidyverse)
+library(knitr)
+library(mediation)
+library(RColorBrewer)
+
+```
+*Longitudinal Results*
+##contrast coding the data##
+```{r, include = FALSE}
+#Read in the data file
+#This data file contains data from all three waves
+
+setwd("/Volumes/Server/Data/Studies/Sci S (Longitudinal Science)/Clean data for analysis")
+science<-read.csv("Longitudinal_long_6.15.18.csv")
+science2 <- science%>% 
+  filter(drop==0)
+sci_graph<-science2
+## Frequencies 
+N=xtabs(~ time + gender, science2)
+N
+N2=xtabs(~time, science2)
+N2
+
+##contrast coding variables
+
+science2$gender[science2$gender == 1] <- -.5
+science2$gender[science2$gender == 2] <- .5
+
+science2$time[science2$time == 1] <- -1
+science2$time[science2$time == 2] <- 0
+science2$time[science2$time == 3] <- 1
+
+science2<-science2%>%
+  filter(condition == "Be" | condition == "Do")
+science2$condition<-as.character(science2$condition)
+science2$condition[science2$condition == "Be"] <- -.5
+science2$condition[science2$condition == "Do"] <- .5
+science2$condition<-as.numeric(science2$condition)
+
+##Interest in Science##
+
+#Recoding 2 to 0 in the binominal question (do you want to be a scientist/do science? Yes/No)
+science2$yousci[science2$yousci==2] <- 0
+
+sciprev<-science2%>%
+  filter(time!=-1)
+
+##re-coding for graph
+
+sci_graph$time[sci_graph$time == 1] <- -1
+sci_graph$time[sci_graph$time == 2] <- 0
+sci_graph$time[sci_graph$time == 3] <- 1
+
+```
+
+## HELPER FUNCTIONS FOR WITHIN SUBJECTS ERROR BARS##
+```{r,include=FALSE}
+
+## HELPER FUNCTIONS FOR WITHIN SUBJECTS ERROR BARS##
+
+normDataWithin <- function(data=NULL, idvar, measurevar, betweenvars=NULL,
+                           na.rm=FALSE, .drop=TRUE) {
+  library(plyr)
+  
+  # Measure var on left, idvar + between vars on right of formula.
+  data.subjMean <- ddply(data, c(idvar, betweenvars), .drop=.drop,
+                         .fun = function(xx, col, na.rm) {
+                           c(subjMean = mean(xx[,col], na.rm=na.rm))
+                         },
+                         measurevar,
+                         na.rm
+  )
+  
+  # Put the subject means with original data
+  data <- merge(data, data.subjMean)
+  
+  # Get the normalized data in a new column
+  measureNormedVar <- paste(measurevar, "_norm", sep="")
+  data[,measureNormedVar] <- data[,measurevar] - data[,"subjMean"] +
+    mean(data[,measurevar], na.rm=na.rm)
+  
+  # Remove this subject mean column
+  data$subjMean <- NULL
+  
+  return(data)
+}
+
+summarySEwithin <- function(data=NULL, measurevar, betweenvars=NULL, withinvars=NULL,
+                            idvar=NULL, na.rm=FALSE, conf.interval=.95, .drop=TRUE) {
+  
+  # Ensure that the betweenvars and withinvars are factors
+  factorvars <- vapply(data[, c(betweenvars, withinvars), drop=FALSE],
+                       FUN=is.factor, FUN.VALUE=logical(1))
+  
+  if (!all(factorvars)) {
+    nonfactorvars <- names(factorvars)[!factorvars]
+    message("Automatically converting the following non-factors to factors: ",
+            paste(nonfactorvars, collapse = ", "))
+    data[nonfactorvars] <- lapply(data[nonfactorvars], factor)
+  }
+  
+  # Get the means from the un-normed data
+  datac <- summarySE(data, measurevar, groupvars=c(betweenvars, withinvars),
+                     na.rm=na.rm, conf.interval=conf.interval, .drop=.drop)
+  
+  # Drop all the unused columns (these will be calculated with normed data)
+  datac$sd <- NULL
+  datac$se <- NULL
+  datac$ci <- NULL
+  
+  # Norm each subject's data
+  ndata <- normDataWithin(data, idvar, measurevar, betweenvars, na.rm, .drop=.drop)
+  
+  # This is the name of the new column
+  measurevar_n <- paste(measurevar, "_norm", sep="")
+  
+  # Collapse the normed data - now we can treat between and within vars the same
+  ndatac <- summarySE(ndata, measurevar_n, groupvars=c(betweenvars, withinvars),
+                      na.rm=na.rm, conf.interval=conf.interval, .drop=.drop)
+  
+  # Apply correction from Morey (2008) to the standard error and confidence interval
+  #  Get the product of the number of conditions of within-S variables
+  nWithinGroups    <- prod(vapply(ndatac[,withinvars, drop=FALSE], FUN=nlevels,
+                                  FUN.VALUE=numeric(1)))
+  correctionFactor <- sqrt( nWithinGroups / (nWithinGroups-1) )
+  
+  # Apply the correction factor
+  ndatac$sd <- ndatac$sd * correctionFactor
+  ndatac$se <- ndatac$se * correctionFactor
+  ndatac$ci <- ndatac$ci * correctionFactor
+  
+  # Combine the un-normed means with the normed results
+  merge(datac, ndatac)
+}
+
+summarySE <- function(data=NULL, measurevar, groupvars=NULL, na.rm=FALSE,
+                      conf.interval=.95, .drop=TRUE) {
+  library(plyr)
+  
+  # New version of length which can handle NA's: if na.rm==T, don't count them
+  length2 <- function (x, na.rm=FALSE) {
+    if (na.rm) sum(!is.na(x))
+    else       length(x)
+  }
+  
+  # This does the summary. For each group's data frame, return a vector with
+  # N, mean, and sd
+  datac <- ddply(data, groupvars, .drop=.drop,
+                 .fun = function(xx, col) {
+                   c(N    = length2(xx[[col]], na.rm=na.rm),
+                     mean = mean   (xx[[col]], na.rm=na.rm),
+                     sd   = sd     (xx[[col]], na.rm=na.rm)
+                   )
+                 },
+                 measurevar
+  )
+  
+  # Rename the "mean" column    
+  datac <- rename(datac, c("mean" = measurevar))
+  
+  datac$se <- datac$sd / sqrt(datac$N)  # Calculate standard error of the mean
+  
+  # Confidence interval multiplier for standard error
+  # Calculate t-statistic for confidence interval: 
+  # e.g., if conf.interval is .95, use .975 (above/below), and use df=N-1
+  ciMult <- qt(conf.interval/2 + .5, datac$N-1)
+  datac$ci <- datac$se * ciMult
+  
+  return(datac)
+}
+```
+
+##Main analyses##
+```{r, include = FALSE}
+#Analyses testing for effects of condition and time on whether children want to be a scientist/do science. This is a Generalized Linear Mixed Model (GLMM), using "glmer" to specify a binomial distribution. Random intercepts are included for participant and classroom.
+
+choicemod<-glmer(cbind(yousci, 1-yousci) ~ condition*time 
+                 + (1|id) + (1|classroom), 
+                 data = science2, 
+                 family = binomial,
+                 glmerControl(optimizer = "bobyqa",
+                optCtrl = list(maxfun=2e5)))
+summary(choicemod)
+tablechoicemod<-as.data.frame(coef(summary(choicemod)))
+tablechoicemod
+
+```
+To investigate whether children were more likely to want to do science than be scientists, we analyzed their responses using a binomial multi-level model (see Figure 1A). Results revealed that overall, children more often wanted to do science (M = .85, SD = .14) than be a scientist (M= .65,*SD*=.13 ), $\beta$ = `r round((tablechoicemod[2,1]),2)`, *SE* = `r round((tablechoicemod[2,2]),2)`, *z* = `r round((tablechoicemod[2,3]),2)`, *p* = `r format.pval((tablechoicemod[2,4]), digits = 2, eps = .001)`.  Additionally, in general, children were less interested in science over time, $\beta$ = `r round((tablechoicemod[3,1]),2)`, *SE* = `r round((tablechoicemod[3,2]),2)`, *z* = `r round((tablechoicemod[3,3]),2)`, *p* = `r format.pval((tablechoicemod[3,4]), digits = 2, eps = .001)`. 
+```{r, echo = FALSE, warning = FALSE}
+
+## Plot effects of be/do condition and time on children's interest in science 
+
+df_wc <- summarySEwithin(science2, measurevar="yousci", 
+                         withinvars="time", 
+                         betweenvars = "condition",
+                        idvar="id", na.rm=TRUE, conf.interval=.95)
+df_wc$time<-factor(df_wc$time,labels = c("Baseline", "4 Months", "8 Months"))
+df_wc$condition<-factor(df_wc$condition,labels = c("Identity-Focused","Action-Focused"))
+df_wc
+
+attach(df_wc)
+yousci_means<-aggregate(df_wc, by = list(condition), FUN = mean, na.rm=TRUE)
+print(yousci_means)
+detach(df_wc)
+
+you_plot<-ggplot(df_wc, aes(x=time,y=yousci,group=1))+
+  geom_point(data=df_wc, aes(x=time,y=yousci,
+                             colour=condition,fill=condition),
+             shape=21, size = 3)+
+  geom_errorbar(width=.2, aes(ymin=yousci-ci,
+                               ymax=yousci+ci))+
+  ylim(0,1)+
+  guides(color = guide_legend(reverse = TRUE)) +
+                guides(fill = guide_legend(reverse = TRUE)) +
+  labs(x="Time",y="Interest in Science")+
+   #guides(color = guide_legend(reverse = TRUE))+
+  theme_classic() + theme(text=element_text(size=14))
+you_plot
+```
+
+```{r, include = FALSE}
+#We used a Linear Mixed Model, using "lmer" to examine the effects of condition and time on how much children want to do science/be scientists. 
+
+modelhowmuch<-lmer(howmuch~condition*time + (1|classroom) + (1|id), 
+                   data = science2)
+summary(modelhowmuch)
+tablehowmuch<-as.data.frame(coef(summary(modelhowmuch)))
+tablehowmuch
+
+
+howmuch_graph<-lmer(howmuch~condition*time + (1|classroom) + (1|id), 
+                   data = sci_graph)
+
+meanhowmuch<-effect("condition*time", 
+                    xlevels=list(condition=c(-.5,.5),
+                                 time=c(-1,0,1)),
+                    howmuch_graph)
+meanhowmuch<-as.data.frame(meanhowmuch)
+#meanhowmuch$time<-factor(meanhowmuch$time,labels = c("Wave 1", "Wave 2", "Wave 3"))
+meanhowmuch$condition<-factor(meanhowmuch$condition,labels = c("Identity-Focused","Action-Focused"))
+meanhowmuch
+
+meanhowmuch2<-effect("condition",modelhowmuch)
+meanhowmuch2<-as.data.frame(meanhowmuch2)
+meanhowmuch2
+```
+We also examined whether children differed in how much they wanted to do science or be scientists (see Figure 1B). Overall, children wanted to do science more (M= 3.1, *SD*= .06) than they wanted to be scientists  (M= 2.8, *SD*= .05), $\beta$ = `r round((tablehowmuch[2,1]),2)`, *SE* = `r round((tablehowmuch[2,2]),2)`, *t* = `r round((tablehowmuch[2,4]),2)`, *p* = `r format.pval((tablehowmuch[2,5]), digits = 2, eps = .001)`, with no main or interactive effects of time. 
+```{r, echo = FALSE, warning = FALSE}
+
+## Plot effects of be/do condition and time on children's how much children wanted to do science/be scientists. 
+View(sci_graph)
+
+sci_graph$condition<-revalue(sci_graph$condition,c("Be"="Identity-focused",
+                                             "Do"="Action-focused"))
+
+plot_howmuch<-ggplot(data=sci_graph, aes(x=time, y=howmuch, colour=condition,linetype=condition)) + 
+  geom_smooth(se=TRUE,method=lm,fullrange=TRUE)+
+    geom_jitter(data=sci_graph,aes(x = time, y = howmuch, color= condition),
+                 stat = "identity", size = 1.5, alpha = .3, 
+                height = 0, width = 0.25, shape=1)+
+  scale_x_discrete(limits = c(-1, 0, 1), labels = c("Baseline", "4 Months", "8 Months")) +
+    labs(x= "Time", y="Extent of Interest")  + 
+   scale_color_discrete(name= "Condition", labels = c("Identity-focused", "Action-focused")) +
+  scale_linetype_discrete(name= "Condition", labels = c("Identity-focused", "Action-focused")) +
+  guides(color = guide_legend(reverse = TRUE)) +
+                guides(linetype = guide_legend(reverse = TRUE)) +
+                theme_classic() + theme(text=element_text(size=14))
+  
+plot_howmuch
+``` 
+
+```{r, include=FALSE}
+
+#We used a Linear Mixed Model, using "lmer" to examine the effects of condition and time on how good children thought they would be at doing science/being a scientist 
+
+modelhowgood<-lmer(howgood~condition*time + (1|classroom) + (1|id), data=science2)
+summary(modelhowgood)
+tablehowgood<-as.data.frame(coef(summary(modelhowgood)))
+tablehowgood
+
+meanhowgood<-effect("condition*time", modelhowgood)
+meanhowgood<-as.data.frame(meanhowgood)
+meanhowgood
+
+meanhowgood2<-effect("condition", modelhowgood)
+meanhowgood2<-as.data.frame(meanhowgood2)
+meanhowgood2
+```
+We next examined children’s self-efficacy in science (see Figure 2). Children thought they would be better at doing science (M=3.1, *SD* = .05)  than being scientists (M = 2.8, *SD* = .05), $\beta$ = `r round((tablehowgood[2,1]),2)`, *SE* = `r round((tablehowgood[2,2]),2)`, *t* = `r round((tablehowgood[2,4]),2)`, *p* = `r format.pval((tablehowgood[2,5]), digits = 2, eps = .001)`. Additionally, there was an effect of time such that children generally thought they would be worse at science over time, $\beta$ = `r round((tablehowgood[3,1]),2)`, *SE* = `r round((tablehowgood[3,2]),2)`, *t* = `r round((tablehowgood[3,4]),2)`, *p* = `r format.pval((tablehowgood[3,5]), digits = 2, eps = .001)`. Most importantly, these effects were subsumed by a significant interaction between condition and time, such that children in the identity-focused condition thought they would be worse at science over time, but children in the action-focused condition showed no significant change over time, $\beta$ = `r round((tablehowgood[4,1]),2)`, *SE* = `r round((tablehowgood[4,2]),2)`, *t* = `r round((tablehowgood[4,4]),2)`, *p* = `r format.pval((tablehowgood[4,5]), digits = 2, eps = .001)`.
+```{r, echo = FALSE, warning = FALSE}
+
+## Plot effects of be/do condition and time on children's self efficacy in science
+
+plot_howgood <- ggplot(data=sci_graph, aes(x=time, y=howgood, colour=condition,linetype=condition)) + 
+  geom_smooth(se=TRUE,method=lm,fullrange=TRUE)+
+    geom_jitter(data=sci_graph,aes(x = time, y = howgood, color= condition),
+                 stat = "identity", size = 1.5, alpha = .3, height = 0, width = 0.25, shape = 1)+
+  scale_x_discrete(limits = c(-1, 0, 1), labels = c("Baseline", "4 Months", "8 Months")) +
+    labs(x= "Time", y="Science Self-Efficacy")  + 
+   scale_color_discrete(name= "Condition", labels = c("Identity-focused", "Action-focused")) +
+  scale_linetype_discrete(name= "Condition", labels = c("Identity-focused", "Action-focused")) +
+  guides(color = guide_legend(reverse = TRUE)) +
+    guides(linetype = guide_legend(reverse = TRUE)) +
+                theme_classic() + theme(text=element_text(size=14))
+plot_howgood
+
+
+```
+
+```{r, include = FALSE}
+
+## prevalence of scientists 
+
+modelprev<-lmer(prevalence~condition*time + (1|classroom) + (1|id), data = sciprev)
+summary(modelprev)
+tableprev<-as.data.frame(coef(summary(modelprev)))
+tableprev
+
+meanprevalence<-effect("condition*time", modelprev)
+meanprevalence<-as.data.frame(meanprevalence)
+meanprevalence
+
+meanprevalence2<-effect("condition", modelprev)
+meanprevalence2<-as.data.frame(meanprevalence2)
+meanprevalence2
+```
+
+##WITHIN-WAVE MEDIATION##
+```{r, include= FALSE}
+
+##MEDIATION ANALYSES##
+##FYI -- lmerTest messes with the mediation package, so do not load it when conducting mediation analyses##
+
+##within wave 2 mediation##
+
+detach("package:lmerTest")
+
+sciprev2<-sciprev %>%
+  filter(time!=1)
+
+sciprev2<-sciprev2 %>%
+    filter(condition=="Be" | condition == "Do")
+  
+b<-lm(prevalence~condition,data=sciprev2)
+c<-lm(howgood~condition+prevalence,data=sciprev2)
+contcont<-mediate(b,c,sims=10000,
+                  treat="condition",
+                  mediator= "prevalence")
+summary(contcont)
+plot(contcont)
+
+
+b1<-lm(prevalence~condition,data=sciprev2)
+c1<-lm(howmuch~condition+prevalence,data=sciprev2)
+contcont1<-mediate(b1,c1,sims=10000,
+                  treat="condition",
+                  mediator= "prevalence")
+summary(contcont1)
+plot(contcont1)
+
+
+b2<-lm(prevalence~condition,data=sciprev2)
+c2<-glm(yousci~condition+prevalence,data=sciprev2)
+contcont2<-mediate(b2,c2,sims=10000,
+                  treat="condition",
+                  mediator= "prevalence")
+summary(contcont2)
+
+## mediation within wave 3 only##
+sciprev3<-sciprev %>%
+  filter(time==1)
+
+View(sciprev3)
+b_w3<-lm(prevalence~condition,data=sciprev3)
+c_w3<-lm(howgood~condition+prevalence,data=sciprev3)
+contcont_hg_w3<-mediate(b_w3,c_w3,sims=1000,
+                  treat="condition",
+                  mediator= "prevalence")
+summary(contcont_hg_w3)
+plot(contcont_hg_w3)
+
+b2_w3<-lm(prevalence~condition,data=sciprev3)
+c2_w3<-lm(howmuch~condition+prevalence,data=sciprev3)
+contcont_hm_w3<-mediate(b2_w3,c2_w3,sims=1000,
+                  treat="condition",
+                  mediator= "prevalence")
+summary(contcont_hm_w3)
+plot(contcont_hm_w3)
+
+
+b3_w3<-lm(prevalence~condition,data=sciprev3)
+c3_w3<-glm(yousci~condition+prevalence,data=sciprev3)
+contcont_yousci_w3<-mediate(b3_w3,c3_w3,sims=1000,
+                  treat="condition",
+                  mediator= "prevalence")
+summary(contcont_yousci_w3)
+plot(contcont_yousci_w3)
+
+```
+
+##longitudinal mediation##
+```{r, include=FALSE}
+
+##Longitudinal mediation##
+
+##use sciprev as the df
+sciprev_lm<-sciprev
+sciprev_lm$wave<-sciprev_lm$time
+
+sciprev_lm<-sciprev_lm[c(3,5,15,17,19,26:29,45)]
+
+sciprev_lm$condition[sciprev_lm$condition == -.5] <- "Be"
+sciprev_lm$condition[sciprev_lm$condition == .5] <- "Do"
+sciprev_lm$condition<-as.factor(sciprev_lm$condition)
+View(sciprev_lm)
+#sciprev_lm<-sciprev_lm %>% 
+#  filter(condition == "Be" | condition == "Do" )
+
+med1<-lmer(prevalence~ condition*time + (1|id), data=sciprev_lm)
+outcome.fit<-lmer(howgood~condition*prevalence*time + (1|id),data=sciprev_lm)
+
+med.out_overall<-mediate(med1,outcome.fit,sims=1000,
+                 treat="condition",
+                 mediator="prevalence",
+                 control.value = -.5,
+                 treat.value = .5)
+summary(med.out_overall)
+
+med.out_t2<-mediate(med1,outcome.fit,sims=1000,
+                 treat="condition",
+                 mediator="prevalence",
+                 covariates = 0,
+                 control.value = -.5,
+                 treat.value = .5)
+summary(med.out_t2)
+
+med.out_t3<-mediate(med1,outcome.fit,sims=1000,
+                 treat="condition",
+                 mediator="prevalence",
+                 covariates = 1,
+                 control.value = "Be",
+                 treat.value = "Do")
+summary(med.out_t3)
+##mediation for the how much measure##
+
+outcome.fit2<-lmer(howmuch~condition*prevalence*time + (1|id),data=sciprev_lm)
+
+med.out2_overall<-mediate(med1,outcome.fit2,sims=1000,
+                 treat="condition",
+                 mediator="prevalence")
+summary(med.out2_overall)
+
+med.out2_t2<-mediate(med1,outcome.fit2,sims=1000,
+                 treat="condition",
+                 mediator="prevalence",
+                 covariates = 0)
+summary(med.out2_t2)
+
+med.out2_t3<-mediate(med1,outcome.fit2,sims=1000,
+                 treat="condition",
+                 mediator="prevalence",
+                 covariates = 1)
+summary(med.out2_t3)
+
+##mediation for the yousci measure##
+
+outcome.fit3<-glmer(cbind(yousci,1-yousci)~condition*prevalence*time + (1|id),
+                    family=binomial, data=sciprev_lm,
+                     glmerControl(optimizer = "bobyqa",
+                optCtrl = list(maxfun=2e5)))
+
+med.out3_overall<-mediate(med1,outcome.fit3,sims=1000,
+                 treat="condition",
+                 mediator="prevalence")
+summary(med.out3_overall)
+
+med.out3_t2<-mediate(med1,outcome.fit3,sims=1000,
+                 treat="condition",
+                 mediator="prevalence",
+                 covariates = 0)
+summary(med.out3_t2)
+
+med.out3_t3<-mediate(med1,outcome.fit3,sims=1000,
+                 treat="condition",
+                 mediator="prevalence",
+                 covariates = 1)
+summary(med.out3_t3)
+
+```
+

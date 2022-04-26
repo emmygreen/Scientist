@@ -1,2 +1,2 @@
 # Scientist
-This repository contains longitudinal analyses examining the effects of language on children's interest and self-efficacy beliefs in science.
+This repository contains a longitudinal analysis examining the effects of language on children's interest and self-efficacy beliefs in science over time.
